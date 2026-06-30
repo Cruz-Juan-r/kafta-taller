@@ -22,3 +22,31 @@
 | Registrar auditoría | **Asíncrono (Kafka)** | La auditoría es un registro de hechos ya ocurridos. No debe afectar la latencia del flujo principal. Kafka garantiza retención para reprocesar si el servicio de auditoría falla. |
 
 **Conclusión:** Los procesos que generan valor inmediato para el usuario (consultas, validaciones críticas) son síncronos. Los procesos derivados o de soporte (notificaciones, analítica, auditoría) son asíncronos mediante eventos, lo que reduce el acoplamiento temporal y mejora la resiliencia.
+
+---
+
+## Capítulo 2 – Apache Kafka: fundamentos y arquitectura interna
+
+### Actividad 2 – Decisiones de configuración
+
+**Configuración analizada:**
+- Topic: `orders` | Particiones: 1 | Replicación: 1 | Sin clave | Retención: 24 horas
+
+### Riesgos identificados
+
+| Elemento | Riesgo |
+|---|---|
+| **1 partición** | Sin paralelismo. Todos los consumidores dentro del mismo Consumer Group procesan secuencialmente. Si el volumen de pedidos crece, el lag aumenta sin posibilidad de escalar horizontalmente añadiendo más instancias del consumidor. |
+| **Replicación 1** | Si el único broker falla, el topic y todos sus eventos se pierden permanentemente. No hay tolerancia a fallos. Inaceptable en producción para datos de negocio críticos. |
+| **Sin clave de particionamiento** | Los eventos del mismo pedido pueden distribuirse en distintas particiones (cuando haya más de una). Kafka no garantiza orden inter-partición, por lo que `order-created` y `order-cancelled` del mismo pedido podrían procesarse fuera de orden. |
+| **Retención 24 horas** | Muy corta para reprocesamiento y auditoría. Si un consumidor falla más de 24 horas, pierde eventos irrecuperables. En un sistema con trazabilidad regulatoria, 24 horas no cumple los requerimientos mínimos. |
+
+### Mejoras propuestas para producción
+
+| Elemento | Configuración sugerida | Motivo |
+|---|---|---|
+| Particiones | 3 o más (según volumen esperado) | Permite paralelismo: hasta 3 consumidores en el mismo grupo procesan simultáneamente. |
+| Replicación | Factor 3 (mínimo 2 en entornos pequeños) | Tolera la caída de hasta 2 brokers sin perder datos. |
+| Clave | `orderId` | Garantiza que todos los eventos del mismo pedido vayan a la misma partición y se procesen en orden causal. |
+| Retención | 7 días o más (según SLA de auditoría) | Permite reprocesamiento ante fallos prolongados y cumple requerimientos regulatorios básicos. |
+| ISR mínimo | 2 | Garantiza que al menos 2 réplicas estén sincronizadas antes de confirmar una escritura (`min.insync.replicas=2`). |
