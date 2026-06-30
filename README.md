@@ -50,3 +50,66 @@
 | Clave | `orderId` | Garantiza que todos los eventos del mismo pedido vayan a la misma partición y se procesen en orden causal. |
 | Retención | 7 días o más (según SLA de auditoría) | Permite reprocesamiento ante fallos prolongados y cumple requerimientos regulatorios básicos. |
 | ISR mínimo | 2 | Garantiza que al menos 2 réplicas estén sincronizadas antes de confirmar una escritura (`min.insync.replicas=2`). |
+
+---
+
+## Capítulo 3 – Preparación del entorno de laboratorio
+
+### Actividad 3 – Entorno Docker, topics y eventos
+
+#### Levantar el entorno
+
+```bash
+docker compose up -d
+docker ps
+```
+
+- **Kafka UI** disponible en: http://localhost:8080
+- **Broker Kafka** en: localhost:9092
+
+#### Crear los tres topics
+
+```bash
+docker exec -it arsw-kafka bash
+
+/opt/kafka/bin/kafka-topics.sh --create --topic orders \
+  --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+/opt/kafka/bin/kafka-topics.sh --create --topic payments \
+  --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+/opt/kafka/bin/kafka-topics.sh --create --topic inventory \
+  --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+/opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+```
+
+#### Publicar cinco eventos JSON
+
+```bash
+/opt/kafka/bin/kafka-console-producer.sh \
+  --topic orders --bootstrap-server localhost:9092 \
+  --property "parse.key=true" --property "key.separator=:"
+```
+
+Eventos publicados (clave:valor):
+
+```
+ORD-1001:{"orderId":"ORD-1001","customerId":"CUS-01","total":120000,"status":"CREATED","occurredAt":"2026-06-30T10:00:00Z"}
+ORD-1002:{"orderId":"ORD-1002","customerId":"CUS-02","total":85000,"status":"CREATED","occurredAt":"2026-06-30T10:01:00Z"}
+ORD-1003:{"orderId":"ORD-1003","customerId":"CUS-03","total":310000,"status":"CREATED","occurredAt":"2026-06-30T10:02:00Z"}
+ORD-1004:{"orderId":"ORD-1004","customerId":"CUS-01","total":45000,"status":"CREATED","occurredAt":"2026-06-30T10:03:00Z"}
+ORD-1005:{"orderId":"ORD-1005","customerId":"CUS-04","total":260000,"status":"CREATED","occurredAt":"2026-06-30T10:04:00Z"}
+```
+
+#### Verificación en Kafka UI (http://localhost:8080)
+
+| Evento | Clave | Partición | Offset | Contenido |
+|---|---|---|---|---|
+| order-created | ORD-1001 | 0 | 0 | JSON completo |
+| order-created | ORD-1002 | 1 | 0 | JSON completo |
+| order-created | ORD-1003 | 2 | 0 | JSON completo |
+| order-created | ORD-1004 | 0 | 1 | JSON completo |
+| order-created | ORD-1005 | 1 | 1 | JSON completo |
+
+> La distribución de particiones depende del hash de la clave (`orderId`): `partition = hash(key) % numPartitions`. Kafka UI permite inspeccionar topic, partición, offset, clave y contenido de cada mensaje.
