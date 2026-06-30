@@ -330,3 +330,91 @@ Por cada pedido se generan tres eventos: uno en `orders`, uno en `payments` y un
 ---
 
 
+## CapÃ­tulo 7 â€“ Manejo de errores, reintentos y Dead Letter Topics
+
+### ImplementaciÃ³n: `DefaultErrorHandler` con DLT
+
+Se agregaron dos clases de configuraciÃ³n en `src/main/java/edu/eci/arsw/kafka/config/`:
+
+**`KafkaTopicConfig.java`** â€” declara los topics DLT como beans para que Spring Kafka los cree automÃ¡ticamente al iniciar:
+
+```java
+@Bean public NewTopic ordersDlt()    { return TopicBuilder.name("orders.DLT")   .partitions(3).replicas(1).build(); }
+@Bean public NewTopic paymentsDlt()  { return TopicBuilder.name("payments.DLT") .partitions(3).replicas(1).build(); }
+@Bean public NewTopic inventoryDlt() { return TopicBuilder.name("inventory.DLT").partitions(3).replicas(1).build(); }
+```
+
+**`KafkaErrorHandlerConfig.java`** â€” registra el `DefaultErrorHandler` global que Spring Kafka aplica automÃ¡ticamente a todos los `@KafkaListener`:
+
+```java
+@Bean
+public DefaultErrorHandler defaultErrorHandler(KafkaTemplate<String, OrderCreatedEvent> kafkaTemplate) {
+    DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
+        kafkaTemplate,
+        (record, exception) -> new TopicPartition(record.topic() + ".DLT", record.partition())
+    );
+    FixedBackOff backOff = new FixedBackOff(2000L, 3L);
+    return new DefaultErrorHandler(recoverer, backOff);
+}
+```
+
+#### Crear los topics DLT manualmente (alternativa al bean)
+
+```bash
+docker exec -it arsw-kafka bash
+
+/opt/kafka/bin/kafka-topics.sh --create --topic orders.DLT \
+  --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+/opt/kafka/bin/kafka-topics.sh --create --topic payments.DLT \
+  --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+/opt/kafka/bin/kafka-topics.sh --create --topic inventory.DLT \
+  --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+```
+
+### Actividad 7 â€“ Estrategia de errores para `inventory-service`
+
+#### Â¿CuÃ¡ndo reintentar?
+
+| Tipo de error | Ejemplo | AcciÃ³n |
+|---|---|---|
+| Transitorio de red | `ConnectException`, `SocketTimeoutException` | Reintentar hasta 3 veces con backoff de 2 s |
+| Transitorio de infraestructura | BD temporalmente no disponible | Reintentar (el error desaparecerÃ¡) |
+| Error permanente de datos | `orderId` nulo, JSON malformado | Enviar directamente a `inventory.DLT` sin reintentos |
+| Error de lÃ³gica de negocio | Pedido cancelado antes de procesarse | Publicar `inventory-rejected`; no usar DLT |
+
+#### Flujo de reintentos configurado
+
+```
+Intento 1: falla â†’ espera 2 s
+Intento 2: falla â†’ espera 2 s
+Intento 3: falla â†’ espera 2 s
+Intento 4 (agotado): â†’ inventory.DLT
+```
+Tiempo mÃ¡ximo antes de llegar al DLT: ~6 segundos. El topic `inventory.DLT` recibe el evento original con headers de diagnÃ³stico (`kafka_exception-message`, `kafka_original-topic`, `kafka_original-partition`, `kafka_original-offset`).
+
+#### Â¿QuÃ© informaciÃ³n revisar en `inventory.DLT`?
+
+- **Headers Spring Kafka**: tipo de excepciÃ³n, stack trace, topic/particiÃ³n/offset original
+- **Cuerpo del evento**: `orderId`, `customerId`, `total`, `occurredAt`
+- **DecisiÃ³n**: Â¿El error es transitorio (se puede reprocesar) o permanente (requiere correcciÃ³n del productor)?
+
+#### Â¿CÃ³mo evitar reprocesamientos infinitos?
+
+1. **DLT como terminal sin consumidor activo**: el DLT no reinyecta automÃ¡ticamente; el equipo analiza antes de actuar.
+2. **Idempotencia**: antes de generar `InventoryProcessedEvent`, se verifica si ya existe un resultado para ese `orderId`. Si existe, el evento duplicado se descarta.
+3. **Reprocesamiento controlado**: cuando se decide reprocesar un evento del DLT, se hace con supervisiÃ³n usando `kafka-consumer-groups.sh --reset-offsets`, nunca de forma automÃ¡tica.
+
+#### Tabla de decisiÃ³n completa
+
+| Error | Causa raÃ­z | AcciÃ³n inmediata | AcciÃ³n diferida |
+|---|---|---|---|
+| `ConnectException` | Red inestable | Reintentar Ã— 3 | Si persiste â†’ DLT |
+| `NullPointerException` en `orderId` | Evento malformado | â†’ DLT directo | Corregir productor |
+| `IllegalStateException` (regla de negocio) | Estado invÃ¡lido | Publicar `inventory-rejected` | No requiere DLT |
+| Error de deserializaciÃ³n JSON | Schema incorrecto | â†’ DLT directo | Actualizar schema en productor |
+
+---
+
+
