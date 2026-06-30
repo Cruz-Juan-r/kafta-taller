@@ -262,3 +262,71 @@ curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d
 | **Acoplamiento implícito** | Un topic global recrea el acoplamiento que Kafka debería eliminar, equivalente a una base de datos compartida entre microservicios. |
 
 **Conclusión:** Un topic por dominio de eventos permite retención independiente, escalado independiente, contratos de datos claros, y consumidores con responsabilidades bien definidas. El costo operativo de gestionar varios topics es ampliamente compensado por la mantenibilidad, la escalabilidad y la resiliencia del sistema.
+
+## CapÃ­tulo 6 â€“ Laboratorio guiado extendido
+
+### ImplementaciÃ³n extendida
+
+El flujo extendido ya estÃ¡ implementado en `OrderEventConsumer`: los Consumer Groups `payment-service` e `inventory-service` consumen `order-created` y publican eventos derivados en `payments` e `inventory` respectivamente.
+
+### Actividad 6 â€“ Evidencia y anÃ¡lisis
+
+#### Pedidos de prueba
+
+```bash
+# Pedido 1: total dentro de ambos umbrales â†’ APPROVED + RESERVED
+curl -X POST http://localhost:8081/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customerId":"CUS-01","total":120000}'
+
+# Pedido 2: supera umbral de pago â†’ REJECTED + RESERVED
+curl -X POST http://localhost:8081/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customerId":"CUS-02","total":280000}'
+
+# Pedido 3: supera ambos umbrales â†’ REJECTED + REJECTED
+curl -X POST http://localhost:8081/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customerId":"CUS-03","total":350000}'
+```
+
+#### ReconstrucciÃ³n del flujo en Kafka UI
+
+Por cada pedido se generan tres eventos: uno en `orders`, uno en `payments` y uno en `inventory`.
+
+| Clave (orderId) | Total | Topic | Evento | Resultado |
+|---|---|---|---|---|
+| ORD-XXX (CUS-01) | 120 000 | `orders` | OrderCreatedEvent | CREATED |
+| ORD-XXX (CUS-01) | 120 000 | `payments` | PaymentProcessedEvent | **APPROVED** |
+| ORD-XXX (CUS-01) | 120 000 | `inventory` | InventoryProcessedEvent | **RESERVED** |
+| ORD-YYY (CUS-02) | 280 000 | `orders` | OrderCreatedEvent | CREATED |
+| ORD-YYY (CUS-02) | 280 000 | `payments` | PaymentProcessedEvent | **REJECTED** |
+| ORD-YYY (CUS-02) | 280 000 | `inventory` | InventoryProcessedEvent | **RESERVED** |
+| ORD-ZZZ (CUS-03) | 350 000 | `orders` | OrderCreatedEvent | CREATED |
+| ORD-ZZZ (CUS-03) | 350 000 | `payments` | PaymentProcessedEvent | **REJECTED** |
+| ORD-ZZZ (CUS-03) | 350 000 | `inventory` | InventoryProcessedEvent | **REJECTED** |
+
+#### Reglas de negocio implementadas
+
+| CondiciÃ³n | Resultado pago | Resultado inventario |
+|---|---|---|
+| total â‰¤ 250 000 y total â‰¤ 300 000 | APPROVED | RESERVED |
+| total > 250 000 y total â‰¤ 300 000 | REJECTED | RESERVED |
+| total > 250 000 y total > 300 000 | REJECTED | REJECTED |
+
+#### Estado de los Consumer Groups tras el procesamiento (lag = 0)
+
+| Consumer Group | Topic | Lag esperado |
+|---|---|---|
+| `payment-service` | `orders` | 0 |
+| `inventory-service` | `orders` | 0 |
+| `analytics-service` | `orders` | 0 |
+| `audit-service` | `orders` | 0 |
+| `notification-service` | `payments` | 0 |
+| `audit-service` | `payments` | 0 |
+
+> `analytics-service` y `audit-service` reciben los tres pedidos independientemente del resultado de pago e inventario, porque pertenecen a Consumer Groups distintos y cada grupo tiene su propia posiciÃ³n de lectura (offset) en las particiones.
+
+---
+
+
