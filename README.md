@@ -537,3 +537,104 @@ Garantiza que todos los eventos relacionados a un mismo pedido (`order-created`,
 ---
 
 
+## CapÃ­tulo 10 â€“ Reto final
+
+### SoluciÃ³n: Plataforma de comercio electrÃ³nico basada en eventos
+
+#### DescripciÃ³n de la soluciÃ³n
+
+La plataforma desacopla los procesos de pedidos, pagos, inventario, facturaciÃ³n, notificaciones, analÃ­tica y auditorÃ­a mediante topics Kafka independientes por dominio. Cada servicio publica eventos que representan hechos ya ocurridos y consume los eventos de otros servicios segÃºn su responsabilidad, sin conocer ni depender directamente del productor.
+
+#### Arquitectura propuesta
+
+```
+Cliente
+    â”‚  REST POST /orders
+    â–¼
+order-service â”€â”€â–º orders â”€â”€â”€â”€â”€â”€â”¬â”€â”€â–º payment-service   â”€â”€â–º payments â”€â”€â”€â”€â”€â”¬â”€â”€â–º notification-service
+                               â”œâ”€â”€â–º inventory-service â”€â”€â–º inventory â”€â”€â”€â”€â”€â”˜
+                               â”œâ”€â”€â–º analytics-service                    â”‚
+                               â””â”€â”€â–º audit-service                        â””â”€â”€â–º invoice-service â”€â”€â–º invoices
+                                                                                                   â”‚
+                                            audit-service â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ (orders, payments, inventory, invoices, notifications)
+```
+
+#### Tabla de servicios
+
+| Servicio | Responsabilidad principal | Topics que produce | Topics que consume |
+|---|---|---|---|
+| order-service | Crear pedidos | `orders` | â€” |
+| payment-service | Procesar pagos | `payments` | `orders` |
+| inventory-service | Validar disponibilidad de stock | `inventory` | `orders` |
+| invoice-service | Generar facturas cuando el pago es aprobado | `invoices` | `payments` |
+| notification-service | Enviar notificaciones al cliente | `notifications` | `payments`, `inventory`, `invoices` |
+| analytics-service | Construir indicadores de negocio | â€” | `orders`, `payments`, `inventory` |
+| audit-service | Registrar trazabilidad completa | `audit` | `orders`, `payments`, `inventory`, `invoices`, `notifications` |
+
+#### Tabla de eventos y topics
+
+| Topic | Eventos principales | Productor | RetenciÃ³n | Particiones | ReplicaciÃ³n | DLT |
+|---|---|---|---|---|---|---|
+| `orders` | `order-created`, `order-cancelled` | order-service | 14 dÃ­as | 6 | 3 | `orders.DLT` |
+| `payments` | `payment-approved`, `payment-rejected` | payment-service | 30 dÃ­as | 3 | 3 | `payments.DLT` |
+| `inventory` | `inventory-reserved`, `inventory-rejected` | inventory-service | 14 dÃ­as | 3 | 3 | `inventory.DLT` |
+| `invoices` | `invoice-generated`, `invoice-failed` | invoice-service | 90 dÃ­as | 3 | 3 | `invoices.DLT` |
+| `notifications` | `notification-sent`, `notification-failed` | notification-service | 7 dÃ­as | 3 | 3 | `notifications.DLT` |
+| `audit` | `audit-record-created` | audit-service | 365 dÃ­as | 6 | 3 | â€” |
+
+> La retenciÃ³n diferenciada responde a requisitos regulatorios: facturas e invoices requieren conservarse meses; notificaciones se pueden purgar en dÃ­as. El topic `audit` no tiene DLT porque es el Ãºltimo eslabÃ³n de la cadena y sus errores se resuelven en el propio servicio.
+
+#### Claves de particionamiento
+
+| Topic | Clave | RazÃ³n |
+|---|---|---|
+| `orders` | `orderId` | Orden causal de eventos del mismo pedido |
+| `payments` | `orderId` | Correlacionar pago con el pedido que lo originÃ³ |
+| `inventory` | `orderId` | Correlacionar reserva con el pedido |
+| `invoices` | `orderId` | Garantizar que la factura llegue despuÃ©s del pago |
+| `notifications` | `orderId` | Evitar notificaciones duplicadas o fuera de orden al cliente |
+| `audit` | `correlationId` | Agrupar todos los eventos de una transacciÃ³n completa para trazabilidad |
+
+#### Consumer Groups
+
+| Servicio | Group ID | Topics que escucha |
+|---|---|---|
+| payment-service | `payment-service` | `orders` |
+| inventory-service | `inventory-service` | `orders` |
+| invoice-service | `invoice-service` | `payments` |
+| notification-service | `notification-service` | `payments`, `inventory`, `invoices` |
+| analytics-service | `analytics-service` | `orders`, `payments`, `inventory` |
+| audit-service | `audit-service` | `orders`, `payments`, `inventory`, `invoices`, `notifications` |
+
+#### Estrategia de errores
+
+| Servicio | PolÃ­tica de reintentos | DLT | Idempotencia |
+|---|---|---|---|
+| payment-service | 3 reintentos Ã— 2 s (`FixedBackOff`) | `payments.DLT` | Verificar si `orderId` ya tiene `PaymentProcessedEvent` |
+| inventory-service | 3 reintentos Ã— 2 s (`FixedBackOff`) | `inventory.DLT` | Verificar si `orderId` ya tiene `InventoryProcessedEvent` |
+| invoice-service | 3 reintentos Ã— 5 s (`ExponentialBackOff`) | `invoices.DLT` | Verificar si ya existe factura para `orderId` + `paymentId` |
+| notification-service | 2 reintentos Ã— 1 s | `notifications.DLT` | Verificar `eventId` procesado en tabla de deduplicaciÃ³n |
+
+#### Riesgos y consistencia eventual
+
+| Escenario | Riesgo | MitigaciÃ³n |
+|---|---|---|
+| Pago aprobado + inventario rechazado | Pedido en estado inconsistente | Saga compensatoria: publicar `payment-refund-requested` |
+| Broker cae durante publicaciÃ³n | Evento no llega a Kafka | Productor con `acks=all` + `enable.idempotence=true` |
+| Consumer Group en rebalanceo | Procesamiento duplicado de un evento | Idempotencia en todos los consumidores por `eventId` |
+| RetenciÃ³n expira antes del reprocesamiento | PÃ©rdida de eventos histÃ³ricos | RetenciÃ³n mÃ­nima 14 dÃ­as + alertas cuando lag supere umbral |
+| DLT se acumula sin revisiÃ³n | Eventos perdidos de facto | Alertas en Kafka UI o Prometheus cuando el DLT recibe mensajes |
+
+#### JustificaciÃ³n de decisiones arquitectÃ³nicas
+
+| DecisiÃ³n | Atributo de calidad | JustificaciÃ³n |
+|---|---|---|
+| Topics por dominio | Mantenibilidad | Contratos de datos aislados; un cambio en `order-created` no afecta al consumidor de `payments` |
+| ReplicaciÃ³n factor 3 | Disponibilidad | Tolera caÃ­da simultÃ¡nea de hasta 2 brokers sin pÃ©rdida de datos |
+| Clave `orderId` | Consistencia | Garantiza orden causal de eventos del mismo pedido dentro de cada particiÃ³n |
+| DLT por topic | Resiliencia | Eventos fallidos se retienen para diagnÃ³stico; sin pÃ©rdida silenciosa |
+| Consumer Groups independientes | Escalabilidad | Cada servicio escala autÃ³nomamente hasta el nÃºmero de particiones del topic |
+| RetenciÃ³n diferenciada | Conformidad regulatoria | Facturas y auditorÃ­a retienen mÃ¡s tiempo; notificaciones optimizan almacenamiento |
+| `acks=all` + `enable.idempotence=true` | CorrecciÃ³n | Cada evento se escribe exactamente una vez, incluso ante fallos de red transitorios |
+| `eventId` + `correlationId` | Observabilidad | Permite rastrear el ciclo de vida completo de un pedido a travÃ©s de todos los servicios |
+
