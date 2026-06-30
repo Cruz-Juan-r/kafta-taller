@@ -418,3 +418,39 @@ Tiempo mÃ¡ximo antes de llegar al DLT: ~6 segundos. El topic `inventory.DLT` r
 ---
 
 
+## CapÃ­tulo 8 â€“ Buenas prÃ¡cticas de diseÃ±o con Kafka
+
+### Actividad 8 â€“ DiagnÃ³stico de buenas prÃ¡cticas
+
+**Arquitectura bajo anÃ¡lisis:**
+- Topic global: `events`
+- Mensajes sin clave de particionamiento
+- Factor de replicaciÃ³n: 1
+- Sin Dead Letter Topics
+- Sin monitoreo de lag
+
+#### Problemas identificados
+
+| Problema | Atributo de calidad afectado | Riesgo en producciÃ³n |
+|---|---|---|
+| **Topic global `events`** | Mantenibilidad, Acoplamiento | Todos los consumidores deben filtrar manualmente; un cambio de schema rompe a todos |
+| **Sin clave de particionamiento** | Consistencia, CorrecciÃ³n | Eventos del mismo pedido pueden llegar fuera de orden en distintas particiones |
+| **1 particiÃ³n** | Escalabilidad, Rendimiento | Sin paralelismo; un consumidor lento bloquea a todos; imposible escalar horizontalmente |
+| **ReplicaciÃ³n 1** | Disponibilidad, Tolerancia a fallos | La caÃ­da del broker genera pÃ©rdida total e irrecuperable de todos los eventos |
+| **Sin DLT** | Resiliencia, Observabilidad | Eventos fallidos se pierden silenciosamente; sin diagnÃ³stico ni recuperaciÃ³n posible |
+| **Sin monitoreo de lag** | Observabilidad, Operabilidad | Imposible detectar acumulaciÃ³n de eventos sin procesar antes de que impacte al negocio |
+
+#### Cambios prioritarios
+
+| Prioridad | Cambio | Atributo que mejora |
+|---|---|---|
+| 1 | Dividir en topics por dominio (`orders`, `payments`, `inventory`â€¦) | Mantenibilidad, Acoplamiento |
+| 2 | ReplicaciÃ³n factor â‰¥ 2 en producciÃ³n | Disponibilidad |
+| 3 | Implementar DLT por topic con `DefaultErrorHandler` | Resiliencia |
+| 4 | Definir clave de particionamiento (`orderId`) | Consistencia |
+| 5 | Aumentar particiones segÃºn volumen esperado | Escalabilidad |
+| 6 | Activar monitoreo de lag (Kafka UI, Prometheus + Grafana) | Observabilidad |
+
+---
+
+
