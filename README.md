@@ -113,3 +113,103 @@ ORD-1005:{"orderId":"ORD-1005","customerId":"CUS-04","total":260000,"status":"CR
 | order-created | ORD-1005 | 1 | 1 | JSON completo |
 
 > La distribución de particiones depende del hash de la clave (`orderId`): `partition = hash(key) % numPartitions`. Kafka UI permite inspeccionar topic, partición, offset, clave y contenido de cada mensaje.
+
+---
+
+## Capítulo 4 – Productores y consumidores con Spring Boot
+
+### Estructura del proyecto
+
+```
+src/main/java/edu/eci/arsw/kafka/
+├── TallerKafkaApplication.java
+├── controller/
+│   └── OrderController.java          ← POST /orders
+├── producer/
+│   ├── OrderEventProducer.java        ← publica en topic orders
+│   ├── PaymentEventProducer.java      ← publica en topic payments
+│   └── InventoryEventProducer.java    ← publica en topic inventory
+├── consumer/
+│   ├── OrderEventConsumer.java        ← 4 grupos: inventory, payment, analytics, audit
+│   └── PaymentEventConsumer.java      ← 2 grupos: notification, audit
+└── dto/
+    ├── OrderCreatedEvent.java
+    ├── PaymentProcessedEvent.java
+    ├── InventoryProcessedEvent.java
+    └── CreateOrderRequest.java
+```
+
+### Actividad 4 – Trazabilidad del evento
+
+#### Prueba
+
+```bash
+curl -X POST http://localhost:8081/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customerId":"CUS-01","total":120000}'
+```
+
+#### Recorrido completo del evento
+
+```
+Cliente HTTP
+    │
+    │  POST /orders  {"customerId":"CUS-01","total":120000}
+    ▼
+OrderController  (puerto 8081)
+    │  Crea OrderCreatedEvent con orderId = ORD-<UUID>
+    ▼
+OrderEventProducer
+    │  kafkaTemplate.send("orders", orderId, event)
+    │  Clave de partición: orderId → hash → partición 0, 1 o 2
+    ▼
+Broker Kafka (localhost:9092)  →  topic: orders
+    │
+    ├──▶ [inventory-service]   consume → publica InventoryProcessedEvent en inventory
+    │        RESERVED si total ≤ 300 000 | REJECTED si total > 300 000
+    │
+    ├──▶ [payment-service]     consume → publica PaymentProcessedEvent en payments
+    │        APPROVED si total ≤ 250 000 | REJECTED si total > 250 000
+    │
+    ├──▶ [analytics-service]   consume → registra métricas (log)
+    │
+    └──▶ [audit-service]       consume → registra auditoría (log)
+```
+
+#### Trazabilidad por campo
+
+| Campo | Valor de ejemplo |
+|---|---|
+| **Topic origen** | `orders` |
+| **Clave** | `ORD-550e8400-e29b-41d4-a716-446655440000` |
+| **Partición** | Determinada por `hash(orderId) % 3` |
+| **Offset** | Asignado secuencialmente por Kafka (0, 1, 2…) |
+| **Consumer Groups** | `inventory-service`, `payment-service`, `analytics-service`, `audit-service` |
+
+#### Pasos de verificación en Kafka UI
+
+1. Abrir http://localhost:8080 → Cluster `arsw-local`
+2. **Topics → orders → Messages**: verificar clave = `ORD-<UUID>`, valor JSON completo, partición asignada
+3. **Consumer Groups**: verificar los 4 grupos con lag = 0 (eventos ya consumidos)
+4. **Topics → payments / inventory**: confirmar eventos generados por los consumidores
+
+#### Cómo ejecutar
+
+```bash
+# 1. Levantar Kafka
+docker compose up -d
+
+# 2. Crear topics (dentro del contenedor)
+docker exec -it arsw-kafka bash
+/opt/kafka/bin/kafka-topics.sh --create --topic orders   --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+/opt/kafka/bin/kafka-topics.sh --create --topic payments --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+/opt/kafka/bin/kafka-topics.sh --create --topic inventory --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+
+# 3. Iniciar la aplicación
+mvn spring-boot:run
+
+# 4. Crear pedidos con distintos totales para observar flujos diferentes
+curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d '{"customerId":"CUS-01","total":120000}'
+curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d '{"customerId":"CUS-02","total":280000}'
+curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d '{"customerId":"CUS-03","total":350000}'
+```
