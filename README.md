@@ -5,6 +5,7 @@
 **Duración:** 2 a 3 horas | **Modalidad:** 2 estudiantes | **Nivel:** Intermedio
 
 ---
+### Elaborado por : Brayan Loaiza y Juan Esteban Cruz 
 
 ## Capítulo 1 – Evolución hacia arquitecturas orientadas por eventos
 
