@@ -1,1 +1,24 @@
-# Taller-Kafta
+# Taller Apache Kafka - ARSW
+
+**Escuela Colombiana de Ingeniería Julio Garavito**  
+**Asignatura:** Arquitecturas de Software (ARSW)  
+**Duración:** 2 a 3 horas | **Modalidad:** 2 estudiantes | **Nivel:** Intermedio
+
+---
+
+## Capítulo 1 – Evolución hacia arquitecturas orientadas por eventos
+
+### Actividad 1 – Análisis de comunicación
+
+**Enunciado:** Para una tienda en línea, clasifique qué procesos deberían ser síncronos, asíncronos o híbridos: consultar productos, crear pedido, validar pago, enviar notificación, actualizar analítica y registrar auditoría.
+
+| Proceso | Tipo | Justificación |
+|---|---|---|
+| Consultar productos | **Síncrono (REST)** | El usuario necesita la respuesta de inmediato para navegar el catálogo. La consulta es simple y no desencadena acciones en otros servicios. |
+| Crear pedido | **Híbrido** | La creación necesita una respuesta inmediata (ID del pedido), pero los procesos posteriores (pago, inventario, notificación) se desencadenan de forma asíncrona mediante eventos. |
+| Validar pago | **Híbrido** | La validación inicial (formato, saldo) puede ser síncrona para rechazar rápidamente. El procesamiento definitivo y la notificación del resultado son asíncronos. |
+| Enviar notificación | **Asíncrono (Kafka)** | Las notificaciones no deben bloquear el flujo principal. El usuario no espera la notificación para que el pedido exista; puede llegar segundos después sin afectar la experiencia. |
+| Actualizar analítica | **Asíncrono (Kafka)** | La analítica es un proceso de lectura diferida. No requiere respuesta inmediata y puede tolerar pequeños retrasos. Kafka permite que analytics-service lea los mismos eventos sin impactar los servicios de negocio. |
+| Registrar auditoría | **Asíncrono (Kafka)** | La auditoría es un registro de hechos ya ocurridos. No debe afectar la latencia del flujo principal. Kafka garantiza retención para reprocesar si el servicio de auditoría falla. |
+
+**Conclusión:** Los procesos que generan valor inmediato para el usuario (consultas, validaciones críticas) son síncronos. Los procesos derivados o de soporte (notificaciones, analítica, auditoría) son asíncronos mediante eventos, lo que reduce el acoplamiento temporal y mejora la resiliencia.
