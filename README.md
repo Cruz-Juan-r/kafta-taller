@@ -454,3 +454,86 @@ Tiempo mÃ¡ximo antes de llegar al DLT: ~6 segundos. El topic `inventory.DLT` r
 ---
 
 
+## CapÃ­tulo 9 â€“ Actividades de consolidaciÃ³n
+
+### 9.1 Decisiones de comunicaciÃ³n
+
+| Proceso | Tipo | JustificaciÃ³n |
+|---|---|---|
+| Consultar catÃ¡logo | **REST** | El usuario necesita respuesta inmediata; es una lectura simple sin efectos secundarios |
+| Crear pedido | **HÃ­brido** | Retorna el ID del pedido sÃ­ncronamente; los procesos derivados (pago, inventario) son asÃ­ncronos |
+| Validar pago | **HÃ­brido** | ValidaciÃ³n de formato y saldo sÃ­ncrona para rechazar rÃ¡pido; procesamiento final asÃ­ncrono |
+| Enviar correo | **Kafka** | Proceso no bloqueante; tolerante a retrasos; el cliente no espera la notificaciÃ³n |
+| Actualizar analÃ­tica | **Kafka** | MÃºltiples consumidores independientes; tolera latencia; no debe afectar el flujo de negocio |
+| Registrar auditorÃ­a | **Kafka** | Registro de hechos ya ocurridos; alta retenciÃ³n; no debe impactar la latencia del flujo principal |
+| Consultar estado del pedido | **REST** | El cliente espera respuesta consistente e inmediata del estado actual |
+| Actualizar inventario | **Kafka** | El `inventory-service` reacciona al evento `order-created`; no requiere respuesta sÃ­ncrona |
+
+### 9.2 DiseÃ±o del flujo de eventos
+
+| Topic | Evento | Productor | Consumer Groups | Clave |
+|---|---|---|---|---|
+| `orders` | `order-created`, `order-cancelled` | order-service | payment-service, inventory-service, analytics-service, audit-service | `orderId` |
+| `payments` | `payment-approved`, `payment-rejected` | payment-service | notification-service, invoice-service, audit-service | `orderId` |
+| `inventory` | `inventory-reserved`, `inventory-rejected` | inventory-service | notification-service, audit-service | `orderId` |
+| `invoices` | `invoice-generated`, `invoice-failed` | invoice-service | notification-service, audit-service | `orderId` |
+| `notifications` | `notification-sent`, `notification-failed` | notification-service | audit-service | `orderId` |
+| `audit` | `audit-record-created` | audit-service | (almacenamiento interno) | `correlationId` |
+
+**Â¿Por quÃ© no un Ãºnico topic `events`?**
+
+| RazÃ³n | Consecuencia si se usa `events` |
+|---|---|
+| Contrato de datos por dominio | Un cambio de schema en `order-created` rompe a todos los consumidores sin distinciÃ³n |
+| Escala independiente | No se puede ajustar particiones ni retenciÃ³n segÃºn la carga de cada dominio |
+| Filtrado manual costoso | Cada consumidor debe inspeccionar el tipo de evento antes de procesarlo |
+| Responsabilidad difusa | No queda claro quÃ© servicio produce quÃ© tipos de eventos ni quÃ© retenciÃ³n aplicar |
+
+**Â¿Por quÃ© Consumer Groups distintos?**  
+Dentro del mismo Consumer Group, Kafka reparte las particiones entre consumidores: cada evento lo recibe un solo consumidor del grupo. Si `payment-service` e `inventory-service` compartieran grupo, solo uno de ellos recibirÃ­a cada `order-created`, rompiendo el flujo completo. Con grupos distintos, cada servicio recibe independientemente todos los eventos.
+
+**Â¿Por quÃ© `orderId` como clave?**  
+Garantiza que todos los eventos relacionados a un mismo pedido (`order-created`, `payment-approved`, `inventory-reserved`) lleguen a la misma particiÃ³n y se procesen en orden causal dentro del servicio consumidor.
+
+### 9.3 DiagnÃ³stico arquitectÃ³nico
+
+**ConfiguraciÃ³n propuesta (a diagnosticar):**
+
+| Elemento | Valor problemÃ¡tico |
+|---|---|
+| Topic principal | `events` (global) |
+| Particiones | 1 |
+| Factor de replicaciÃ³n | 1 |
+| RetenciÃ³n | 12 horas |
+| Clave | Ninguna |
+| `eventId` / `correlationId` | Ausentes |
+| Consumer Groups | Todos los servicios en el mismo grupo |
+| Dead Letter Topics | Ninguno |
+| Monitoreo de lag | Ninguno |
+
+**DiagnÃ³stico tÃ©cnico:**
+
+| Problema | CategorÃ­a | Atributo afectado | Riesgo |
+|---|---|---|---|
+| Topic global `events` | DiseÃ±o | Mantenibilidad | Schema coupling entre todos los servicios; un cambio rompe a todos |
+| 1 particiÃ³n | Infraestructura | Escalabilidad | Sin paralelismo; throughput limitado sin soluciÃ³n posible |
+| ReplicaciÃ³n 1 | Infraestructura | Disponibilidad | PÃ©rdida total de datos ante fallo del Ãºnico broker |
+| RetenciÃ³n 12 horas | ConfiguraciÃ³n | Resiliencia | Sin reprocesamiento si un servicio falla mÃ¡s de 12 horas |
+| Sin clave | DiseÃ±o | Consistencia | Orden de eventos no garantizado para la misma entidad de negocio |
+| Sin `eventId`/`correlationId` | DiseÃ±o | Trazabilidad | Imposible rastrear un evento a travÃ©s de mÃºltiples servicios |
+| Mismo Consumer Group | DiseÃ±o | CorrecciÃ³n | Cada evento llega a un solo servicio; el resto nunca lo recibe |
+| Sin DLT | OperaciÃ³n | Resiliencia | Eventos fallidos se pierden silenciosamente; sin diagnÃ³stico posible |
+| Sin monitoreo de lag | OperaciÃ³n | Observabilidad | El backlog es invisible hasta que los SLAs se incumplen |
+
+**Cambios prioritarios (por impacto):**
+1. Separar en topics por dominio â†’ rompe el acoplamiento de contratos
+2. Asignar Consumer Group distinto por servicio â†’ corrige el flujo de recepciÃ³n
+3. ReplicaciÃ³n â‰¥ 2 â†’ disponibilidad en producciÃ³n
+4. Agregar `eventId` y `correlationId` â†’ trazabilidad end-to-end
+5. Implementar DLT por topic â†’ resiliencia y diagnÃ³stico
+6. RetenciÃ³n â‰¥ 7 dÃ­as â†’ reprocesamiento y cumplimiento regulatorio
+7. Monitoreo de lag â†’ observabilidad operativa proactiva
+
+---
+
+
