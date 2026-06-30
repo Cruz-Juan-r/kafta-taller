@@ -213,3 +213,52 @@ curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d
 curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d '{"customerId":"CUS-02","total":280000}'
 curl -X POST http://localhost:8081/orders -H "Content-Type: application/json" -d '{"customerId":"CUS-03","total":350000}'
 ```
+
+---
+
+## Capítulo 5 – Caso de estudio: sistema de pedidos basado en eventos
+
+### Actividad 5 – Diseño del flujo de eventos
+
+**Enunciado:** Proponga los eventos, topics, productores, consumidores, Consumer Groups y claves de particionamiento para el flujo de compra. Justifique por qué no conviene usar un único topic global llamado `events`.
+
+#### Propuesta de topics y eventos
+
+| Topic | Eventos | Productor | Consumidores (grupos) | Clave |
+|---|---|---|---|---|
+| `orders` | `order-created`, `order-cancelled` | order-service | payment-service, inventory-service, analytics-service, audit-service | `orderId` |
+| `payments` | `payment-approved`, `payment-rejected` | payment-service | notification-service, invoice-service, audit-service | `orderId` |
+| `inventory` | `inventory-reserved`, `inventory-rejected` | inventory-service | notification-service, audit-service | `orderId` |
+| `invoices` | `invoice-generated`, `invoice-failed` | invoice-service | notification-service, audit-service | `orderId` |
+| `notifications` | `notification-sent`, `notification-failed` | notification-service | audit-service | `orderId` |
+| `audit` | `audit-record-created` | audit-service | (almacenamiento interno) | `correlationId` |
+
+#### Consumer Groups definidos
+
+| Servicio | Group ID | Razón |
+|---|---|---|
+| payment-service | `payment-service` | Procesa pagos de forma independiente; su ritmo no debe verse afectado por otros servicios |
+| inventory-service | `inventory-service` | Valida disponibilidad en paralelo con pagos, sin bloquear ni ser bloqueado por ellos |
+| notification-service | `notification-service` | Recibe eventos de múltiples topics para consolidar notificaciones al cliente |
+| analytics-service | `analytics-service` | Lee todos los eventos a su propio ritmo sin afectar el flujo de negocio |
+| audit-service | `audit-service` | Registra trazabilidad de forma independiente; puede ir más lento sin consecuencias |
+| invoice-service | `invoice-service` | Solo actúa cuando el pago es aprobado; grupo propio para controlar su lag |
+
+#### Clave de particionamiento: `orderId`
+
+- Todos los eventos relacionados a un mismo pedido se envían a la **misma partición**.
+- Garantiza **orden causal**: `order-created` siempre se procesa antes que `payment-approved` o `inventory-reserved` del mismo pedido dentro del mismo grupo.
+- Sin clave, eventos de un mismo pedido podrían llegar en orden incorrecto si caen en distintas particiones, causando inconsistencias de estado (ej: procesar `order-cancelled` antes de `order-created`).
+
+#### Por qué NO usar un único topic `events`
+
+| Problema | Impacto |
+|---|---|
+| **Sin separación de dominio** | payment-service debería filtrar manualmente los eventos que le interesan entre un flujo mezclado, aumentando complejidad y riesgo de errores. |
+| **Clave de particionamiento inútil** | Eventos de distintos dominios (pedidos, pagos, facturas) mezclados hacen imposible garantizar orden lógico por entidad. |
+| **Sin escala por dominio** | No se puede ajustar particiones ni retención según la carga específica de cada tipo de evento. |
+| **Contrato frágil** | Cambiar la estructura de un tipo de evento afecta a todos los consumidores del topic global, rompiendo el principio de desacoplamiento. |
+| **Retención indiferenciada** | Auditoría necesita retención larga (semanas/meses); notificaciones pueden purgar en horas. Con un topic global, la política es la misma para todos. |
+| **Acoplamiento implícito** | Un topic global recrea el acoplamiento que Kafka debería eliminar, equivalente a una base de datos compartida entre microservicios. |
+
+**Conclusión:** Un topic por dominio de eventos permite retención independiente, escalado independiente, contratos de datos claros, y consumidores con responsabilidades bien definidas. El costo operativo de gestionar varios topics es ampliamente compensado por la mantenibilidad, la escalabilidad y la resiliencia del sistema.
